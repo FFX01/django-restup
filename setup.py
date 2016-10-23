@@ -12,7 +12,7 @@ setup(
 
     version='0.1.0',
 
-    description='A Library for creating REST APIs fro Django applications',
+    description='A Library for creating REST APIs for Django applications',
     long_description=long_description,
 
     url='https://github.com/FFX01/django-restup',
