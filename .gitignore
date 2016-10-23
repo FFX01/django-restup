@@ -1,0 +1,9 @@
+# general things to ignore
+build/
+dist/
+bin/
+*.egg-info/
+*.so
+include/
+lib/
+.idea

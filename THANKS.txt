@@ -1,0 +1,16 @@
+Special thanks to the following people and projects as they served as sources of inspiration and knowledge:
+
+- Django REST Framework:
+    url: https://github.com/tomchristie/django-rest-framework
+    maintainer: Tom Christie
+        url: https://github.com/tomchristie
+
+- Django Tastypie:
+    url: https://github.com/django-tastypie
+    maintainer: Daniel Lindsley
+        url: https://github.com/toastdriven
+
+- Restless:
+    url: https://github.com/toastdriven/restless
+    maintainer: Daniel Lindsley
+        url: https://github.com/toastdriven
