@@ -31,6 +31,12 @@ This explicitness comes with some major benefits:
 ===============
 Getting Started
 ===============
+Installation
+------------
+RestUp is on PyPI!::
+
+    >>> pip install django-restup
+    
 Schema Definition
 -----------------
 At the core of a RestUp ``ModelResource`` is it's schema definition. You 
