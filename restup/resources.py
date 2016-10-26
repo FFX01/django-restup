@@ -3,7 +3,10 @@ from django.conf.urls import url
 from django.views.decorators.csrf import csrf_exempt
 from django.http import HttpResponse
 from django.contrib.auth import get_user_model
+from django.db.models import Model, Manager
+from django.core.urlresolvers import reverse
 
+from . import exceptions
 from .serializers import JsonSerializer
 from .constants import (OK, CREATED, NO_CONTENT, METHOD_NOT_ALLOWED,
                         UNAUTHORIZED, NOT_FOUND, FORBIDDEN, BAD_REQUEST, ERROR)
@@ -68,13 +71,22 @@ class ModelResource(object):
         return [
             url(
                 r'^$',
-                cls.as_list()
+                cls.as_list(),
+                name=cls.build_viewname('list')
             ),
             url(
                 r'^(?P<pk>\w[\w/-]*)/$',
-                cls.as_detail()
+                cls.as_detail(),
+                name=cls.build_viewname('detail')
             )
         ]
+
+    @classmethod
+    def build_viewname(cls, endpoint):
+        return "api_{n}_{ep}".format(
+            n=cls.model._meta.model_name,
+            ep=endpoint
+        )
 
     @classmethod
     def as_list(cls, *initargs, **initkwargs):
@@ -153,12 +165,12 @@ class ModelResource(object):
         """
         request_method = self.request_method()
         if not self.method_check(request_method):
-            return HttpResponse(
-                status=METHOD_NOT_ALLOWED
+            return self.create_error_response(
+                exceptions.NotAllowed()
             )
         if not self.is_authenticated(self.request):
-            return HttpResponse(
-                status=UNAUTHORIZED
+            return self.create_error_response(
+                exceptions.Unauthorized()
             )
         self.data = self.deserialize(action, self.request_body())
         view_method_name = self.ACTIONS[action][request_method]
@@ -173,6 +185,24 @@ class ModelResource(object):
         :type return: str
         """
         return self.request.method
+
+    def create_response(self, status, data):
+        return HttpResponse(
+            status=status,
+            content_type='application/json',
+            content=data
+        )
+
+    def create_error_response(self, exc):
+        data = {
+            'error': exc.msg
+        }
+        payload = self.serializer.serialize(data)
+        return HttpResponse(
+            status=exc.status,
+            content_type='application/json',
+            content=payload
+        )
 
     def request_body(self):
         """
@@ -234,6 +264,15 @@ class ModelResource(object):
             return self.serializer.deserialize(body)
         return {}
 
+    def build_uri(self, obj):
+        viewname = "api_{n}_detail".format(
+            n=obj._meta.model_name
+        )
+        return reverse(
+            viewname=viewname,
+            kwargs={'pk': obj.pk}
+        )
+
     def build_filters(self):
         """
         Method that builds a dictionary of filters to apply to the queryset.
@@ -286,11 +325,19 @@ class ModelResource(object):
         :return: A dictionary representation of the object.
         :type return: dict
         """
-        prepped_obj = dict()
+        prepped_obj = {
+            'resource_uri': self.build_uri(obj)
+        }
         for key, value in self.schema.items():
             if value.get('readable', True):
                 if hasattr(obj, value['attribute']):
-                    prepped_obj[key] = getattr(obj, value['attribute'])
+                    model_value = getattr(obj, value['attribute'])
+                    if isinstance(model_value, Model):
+                        prepped_obj[key] = self.build_uri(model_value)
+                    elif isinstance(model_value, Manager):
+                        prepped_obj[key] = [self.build_uri(obj) for obj in model_value.all()]
+                    else:
+                        prepped_obj[key] = model_value
         return prepped_obj
 
     def paginate(self, queryset):
@@ -312,8 +359,8 @@ class ModelResource(object):
         try:
             page = paginator.page(number=page_num)
         except InvalidPage:
-            return HttpResponse(
-                status=ERROR
+            return self.create_error_response(
+                exceptions.HttpError()
             )
         return page
 
@@ -437,21 +484,28 @@ class ModelResource(object):
 
         :return: A brand new model instance. Fresh out of the oven.
         """
-        attributes = dict()
-        for key, value in self.data.items():
-            if key in self.schema:
-                field = self.schema.get(key)
-                if field.get('writeable', True):
-                    attributes[field['attribute']] = value
-        if self.model == get_user_model():
-            obj = self.model.objects.create_user(
-                **attributes
-            )
-        else:
-            obj = self.model.objects.create(
-                **attributes
-            )
-        return obj
+        try:
+            attributes = dict()
+            for key, value in self.data.items():
+                if key in self.schema:
+                    field = self.schema.get(key)
+                    if field.get('writeable', True):
+                        attributes[field['attribute']] = value
+            if self.model == get_user_model():
+                obj = self.model.objects.create_user(
+                    **attributes
+                )
+            else:
+                obj = self.model.objects.create(
+                    **attributes
+                )
+            return obj
+        except ValueError:
+            raise exceptions.HttpError()
+        except KeyError:
+            raise exceptions.BadRequest()
+        except Exception:
+            raise exceptions.HttpError()
 
     def get_obj(self, pk):
         """
@@ -463,9 +517,10 @@ class ModelResource(object):
         instance doesn't exist.
         """
         try:
-            return self.model.objects.get(pk=pk)
+            obj = self.model.objects.get(pk=pk)
         except self.model.DoesNotExist:
-            return HttpResponse(status=NOT_FOUND)
+            raise exceptions.NotFound()
+        return obj
 
     def get_obj_list(self):
         """
@@ -474,7 +529,10 @@ class ModelResource(object):
         :return: A Django queryset.
         :type return: queryset
         """
-        return self.model.objects.all()
+        try:
+            return self.model.objects.all()
+        except Exception as e:
+            raise exceptions.HttpError()
 
     def update_obj(self, obj):
         """
@@ -487,12 +545,19 @@ class ModelResource(object):
         the new data has been committed to the Db.
         :type return: object
         """
-        for key, value in self.data.items():
-            if key in self.schema:
-                schema_field = self.schema.get(key)
-                model_field = schema_field.get('attribute')
-                setattr(obj, model_field, value)
-        obj.save()
+        try:
+            for key, value in self.data.items():
+                if key in self.schema:
+                    schema_field = self.schema.get(key)
+                    model_field = schema_field.get('attribute')
+                    setattr(obj, model_field, value)
+            obj.save()
+        except KeyError:
+            raise exceptions.BadRequest()
+        except ValueError:
+            raise exceptions.BadRequest()
+        except Exception as e:
+            raise exceptions.HttpError()
         return obj
 
     def delete_obj(self, obj):
@@ -512,7 +577,10 @@ class ModelResource(object):
         a normal django model instance is provided as the `obj` argument, there
         shouldn't be any major errors.
         """
-        obj.delete()
+        try:
+            obj.delete()
+        except Exception:
+            raise exceptions.HttpError()
         return None
 
     def create(self):
@@ -530,13 +598,15 @@ class ModelResource(object):
             return HttpResponse(
                 status=BAD_REQUEST
             )
-        obj = self.create_obj()
+        try:
+            obj = self.create_obj()
+        except Exception as e:
+            return self.create_error_response(e)
         prepped_obj = self.prepare(obj)
         serialized_obj = self.serializer.serialize(prepped_obj)
-        return HttpResponse(
+        return self.create_response(
             status=CREATED,
-            content_type='application/json',
-            content=serialized_obj
+            data=serialized_obj
         )
 
     def list(self):
@@ -548,9 +618,12 @@ class ModelResource(object):
         :return: A Django Http Response object.
         :type return: object
         """
-        obj_list = self.apply_filters(
-            self.get_obj_list()
-        )
+        try:
+            obj_list = self.apply_filters(
+                self.get_obj_list()
+            )
+        except Exception as e:
+            return self.create_error_response(e)
         if not self.can_get_list(obj_list, self.request):
             return HttpResponse(
                 status=FORBIDDEN
@@ -559,10 +632,9 @@ class ModelResource(object):
         prepped_list = [self.prepare(obj) for obj in page.object_list]
         wrapped_data = self.wrap_list(page, prepped_list)
         serialized_list = self.serializer.serialize(wrapped_data)
-        return HttpResponse(
+        return self.create_response(
             status=OK,
-            content_type='application/json',
-            content=serialized_list
+            data=serialized_list
         )
 
     def detail(self, **kwargs):
@@ -578,17 +650,19 @@ class ModelResource(object):
         :return: An Http Response object.
         :type return: object
         """
-        obj = self.get_obj(pk=kwargs['pk'])
+        try:
+            obj = self.get_obj(pk=kwargs['pk'])
+        except Exception as e:
+            return self.create_error_response(e)
         if not self.can_get(obj, self.request):
             return HttpResponse(
                 status=FORBIDDEN
             )
         prepped_obj = self.prepare(obj)
         serialized_obj = self.serializer.serialize(prepped_obj)
-        return HttpResponse(
+        return self.create_response(
             status=OK,
-            content_type='application/json',
-            content=serialized_obj
+            data=serialized_obj
         )
 
     def update(self, **kwargs):
@@ -603,7 +677,10 @@ class ModelResource(object):
         :return: A Http response object.
         :type return: object
         """
-        obj = self.get_obj(pk=kwargs['pk'])
+        try:
+            obj = self.get_obj(pk=kwargs['pk'])
+        except Exception as e:
+            return self.create_error_response(e)
         if not self.can_update(obj, self.request):
             return HttpResponse(
                 status=FORBIDDEN
@@ -615,19 +692,25 @@ class ModelResource(object):
         obj = self.update_obj(obj)
         prepped_obj = self.prepare(obj)
         serialized_obj = self.serializer.serialize(prepped_obj)
-        return HttpResponse(
+        return self.create_response(
             status=OK,
-            content_type='application/json',
-            content=serialized_obj
+            data=serialized_obj
         )
 
     def delete(self, **kwargs):
-        obj = self.get_obj(pk=kwargs['pk'])
+        try:
+            obj = self.get_obj(pk=kwargs['pk'])
+        except Exception as e:
+            return self.create_error_response(e)
         if not self.can_delete(obj, self.request):
             return HttpResponse(
                 status=FORBIDDEN
             )
-        self.delete_obj(obj)
-        return HttpResponse(
-            status=NO_CONTENT
+        try:
+            self.delete_obj(obj)
+        except Exception as e:
+            return self.create_error_response(e)
+        return self.create_response(
+            status=NO_CONTENT,
+            data=None
         )
