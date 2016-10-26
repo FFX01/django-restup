@@ -410,6 +410,129 @@ integer. However, that would return a ``500 Server error`` response. That's not
 very helpful for the client. It would be much better to return a ``400 Bad Request``
 response to let the client know they entered something incorrectly.
 
+--------------
+Related Fields
+--------------
+Related field support has recently been added to RestUp. at this point, related
+field support works for common use cases including the following:
+
+- Foreign Key relationships
+- Reverse Foreign Key relationships
+- Many to Many relations in both directions
+- Many to Many relations with through models. This accesses the many-to-many related
+  models by default. If you want to access the through model instead, you must reference
+  the related name for the reverse foreign key relationship on the through model.
+
+Example
+-------
+
+Let's build a couple of models::
+
+    # ~/myapp/models.py
+
+    from django.db import models
+
+    class User(models.Model):
+
+        name = models.CharField(
+            max_length=200,
+            blank=False
+        )
+
+        aliases = models.ManyToManyField(
+            to='myapp.Alias',
+            through='myapp.AliasInfo'
+        )
+
+
+    class Alias(models.Model):
+
+        alias = models.CharField(
+            max_length=200,
+            blank=False
+        )
+
+
+    class AliasInfo(models.Model):
+
+        user = models.ForeignKey(
+            to='myapp.User',
+            related_name='aliases_info'
+        )
+
+        alias = models.ForeignKey(
+            to='myapp.Alias',
+            related_name='info'
+        )
+
+        notes = models.TextField()
+
+Now, let's say we want to expose our aliases as a list in our user resource::
+
+    # ~/myapp/api.py
+
+    from restup import ModelResource
+    from .models import User
+
+    class UserResource(ModelResource):
+
+        model = User
+
+        schema = {
+            'id': {
+                'attribute': 'id',
+                'writeable': False
+            },
+            'name': {
+                'attribute': 'name'
+            },
+            'aliases': {
+                'attribute': 'aliases'
+            }
+        }
+
+That's it! Now, our aliases will show up as a list of `resource_uri` strings.
+Each one may look something like `/api/aliases/1/`.
+
+Now let's set up our `AliasInfo` resource::
+
+    # ~/myapp/api.py
+
+    from restup import ModelResource
+    from .models import AliasInfo
+
+    # I won't declare all fields here to save typing
+
+    class AliasInfoResource(ModelResource):
+
+        model = AliasInfo
+
+        schema = {
+            'id': {
+                'attribute': 'id'
+            },
+            'user': {
+                'attribute': 'user'
+            }
+        }
+
+Now our `AliasInfo` resource will output the `user` field as a `resource_uri`
+string something like `/api/users/1/`. The `ModelResource` class automatically
+detects related fields in it's `prepare` method and does the lookups to determine
+the referenced object's `resource_uri`. It does this by creating a unique pair
+of view names for each resource in the form of `api_<model class name>_detail`
+and `api_<model class name>_list` and using django's built in
+`<django.core.urlresolvers.reverse>` method to build the URI.
+
+**Note:** Currently, RestUp cannot handle creating relationships very well. This
+feature is on the list of things to be built out sooner rather than later as I
+personally believe it is very important that an API library has this capability.
+
+**Note 2:** There is likely a ton of bugs with the current related model lookups.
+Tests will be developed soon. Hopefully thorough testing will resolve any of these
+edge cases. Due to the nature of relationships between models, I seriously doubt
+I will ever be able to find and fix all of the bugs, but I will do my best.
+
 ==========
 Conclusion
 ==========
